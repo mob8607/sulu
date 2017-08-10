@@ -1,6 +1,7 @@
 <?php
+
 /*
- * This file is part of the Sulu CMS.
+ * This file is part of Sulu.
  *
  * (c) MASSIVE ART WebServices GmbH
  *
@@ -10,303 +11,180 @@
 
 namespace Sulu\Component\Webspace\Analyzer;
 
-use Sulu\Component\Security\UserRepositoryInterface;
-use Sulu\Component\Webspace\Analyzer\Exception\UrlMatchNotFoundException;
-use Sulu\Component\Webspace\Localization;
-use Sulu\Component\Webspace\Manager\WebspaceManagerInterface;
-use Sulu\Component\Webspace\Portal;
-use Sulu\Component\Webspace\Segment;
-use Sulu\Component\Webspace\Webspace;
+use Sulu\Component\Webspace\Analyzer\Attributes\RequestAttributes;
+use Sulu\Component\Webspace\Analyzer\Attributes\RequestProcessorInterface;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\RequestStack;
 
+/**
+ * Default request analyzer will be used for sulu-admin and extended for sulu-website.
+ */
 class RequestAnalyzer implements RequestAnalyzerInterface
 {
     /**
-     * Describes the match
-     * @var int
+     * @var RequestProcessorInterface[]
      */
-    private $matchType;
+    private $requestProcessors;
 
     /**
-     * The WebspaceManager, responsible for loading the required webspaces
-     * @var WebspaceManagerInterface
+     * @var RequestStack
      */
-    private $webspaceManager;
+    private $requestStack;
 
-    /**
-     * @var UserRepositoryInterface
-     */
-    private $userRepository;
-
-    /**
-     * The environment valid to analyze the request
-     * @var string
-     */
-    private $environment;
-
-    /**
-     * The current webspace valid for the current request
-     * @var Webspace
-     */
-    private $webspace;
-
-    /**
-     * The current portal valid for the current request
-     * @var Portal
-     */
-    private $portal;
-
-    /**
-     * The current segment valid for the current request
-     * @var Segment
-     */
-    private $segment;
-
-    /**
-     * The current localization valid for the current request
-     * @var Localization
-     */
-    private $localization;
-
-    /**
-     * The redirect, null if not existent
-     * @var string
-     */
-    private $redirect;
-
-    /**
-     * The url of the current portal
-     * @var string
-     */
-    private $portalUrl;
-
-    /**
-     * The path of the current request
-     * @var string
-     */
-    private $resourceLocator;
-
-    /**
-     * The prefix required before the resource locator
-     * @var string
-     */
-    private $resourceLocatorPrefix;
-
-    public function __construct(WebspaceManagerInterface $webspaceManager, UserRepositoryInterface $userRepository, $environment)
+    public function __construct(RequestStack $requestStack, array $requestProcessors)
     {
-        $this->webspaceManager = $webspaceManager;
-        $this->userRepository = $userRepository;
-        $this->environment = $environment;
+        $this->requestStack = $requestStack;
+        $this->requestProcessors = $requestProcessors;
     }
 
     /**
-     * Analyzes the current request, and saves the values for portal, localization and segment for further usage
-     * @param Request $request The request to analyze
-     * @throws Exception\UrlMatchNotFoundException
+     * {@inheritdoc}
      */
     public function analyze(Request $request)
     {
-        $url = $request->getHost() . $request->getRequestUri();
-        $portalInformation = $this->webspaceManager->findPortalInformationByUrl(
-            $url,
-            $this->environment
-        );
+        if ($request->attributes->has('_sulu')) {
+            return;
+        }
 
-        if ($portalInformation != null) {
-            $this->setCurrentMatchType($portalInformation->getType());
-            if ($portalInformation->getType() == RequestAnalyzerInterface::MATCH_TYPE_REDIRECT) {
-                $this->setCurrentPortalUrl($portalInformation->getUrl());
-                $this->setCurrentRedirect($portalInformation->getRedirect());
-                $this->setCurrentWebspace($portalInformation->getWebspace());
-            } else {
-                $this->setCurrentPortalUrl($portalInformation->getUrl());
-                $this->setCurrentLocalization($portalInformation->getLocalization());
-                $this->setCurrentPortal($portalInformation->getPortal());
-                $this->setCurrentWebspace($portalInformation->getWebspace());
+        $attributes = new RequestAttributes(['scheme' => $request->getScheme(), 'requestUri' => $request->getRequestUri()]);
+        foreach ($this->requestProcessors as $requestProcessor) {
+            $attributes = $attributes->merge($requestProcessor->process($request, $attributes));
+        }
 
-                $this->setCurrentSegment($portalInformation->getSegment());
+        $request->attributes->set('_sulu', $attributes);
+    }
 
-                // get the path and set it on the request
-                $this->setCurrentResourceLocator(
-                    substr(
-                        $request->getHost() . $request->getRequestUri(),
-                        strlen($portalInformation->getUrl())
-                    )
-                );
+    /**
+     * {@inheritdoc}
+     */
+    public function validate(Request $request)
+    {
+        $attributes = $request->attributes->get('_sulu');
 
-                // get the resource locator prefix and set it
-                $this->setCurrentResourceLocatorPrefix(
-                    substr(
-                        $portalInformation->getUrl(),
-                        strlen($request->getHost())
-                    )
-                );
-            }
-        } else {
-            throw new UrlMatchNotFoundException($request->getUri());
+        foreach ($this->requestProcessors as $provider) {
+            $provider->validate($attributes);
         }
     }
 
-    public function getCurrentMatchType()
-    {
-        return $this->matchType;
-    }
-
     /**
-     * Returns the current webspace for this request
-     * @return Webspace
+     * {@inheritdoc}
      */
-    public function getCurrentWebspace()
+    public function getAttribute($name, $default = null)
     {
-        return $this->webspace;
+        $request = $this->requestStack->getCurrentRequest();
+
+        if (null === $request) {
+            return $default;
+        }
+
+        if (!$request->attributes->has('_sulu')) {
+            return $default;
+        }
+
+        return $request->attributes->get('_sulu')->getAttribute($name, $default);
     }
 
     /**
-     * Returns the current portal for this request
-     * @return Portal
+     * {@inheritdoc}
      */
-    public function getCurrentPortal()
+    public function getMatchType()
     {
-        return $this->portal;
+        return $this->getAttribute('matchType');
     }
 
     /**
-     * Returns the current segment for this request
-     * @return Segment
+     * {@inheritdoc}
      */
-    public function getCurrentSegment()
+    public function getWebspace()
     {
-        return $this->segment;
+        return $this->getAttribute('webspace');
     }
 
     /**
-     * Returns the current localization for this Request
-     * @return Localization
+     * {@inheritdoc}
+     */
+    public function getPortal()
+    {
+        return $this->getAttribute('portal');
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function getSegment()
+    {
+        return $this->getAttribute('segment');
+    }
+
+    /**
+     * {@inheritdoc}
      */
     public function getCurrentLocalization()
     {
-        return $this->localization;
+        return $this->getAttribute('localization');
     }
 
     /**
-     * Returns the url of the current Portal
-     * @return string
+     * {@inheritdoc}
      */
-    public function getCurrentPortalUrl()
+    public function getPortalUrl()
     {
-        return $this->portalUrl;
+        return $this->getAttribute('portalUrl');
     }
 
     /**
-     * Returns the redirect, null if there is no redirect
-     * @return string
+     * {@inheritdoc}
      */
-    public function getCurrentRedirect()
+    public function getRedirect()
     {
-        return $this->redirect;
+        return $this->getAttribute('redirect');
     }
 
     /**
-     * Returns the path of the current request, which is the url without host, language and so on
-     * @return string
+     * {@inheritdoc}
      */
-    public function getCurrentResourceLocator()
+    public function getResourceLocator()
     {
-        return $this->resourceLocator;
+        return $this->getAttribute('resourceLocator', false);
     }
 
     /**
-     * Returns the prefix required before the resource locator
-     * @return string
+     * {@inheritdoc}
      */
-    public function getCurrentResourceLocatorPrefix()
+    public function getResourceLocatorPrefix()
     {
-        return $this->resourceLocatorPrefix;
+        return $this->getAttribute('resourceLocatorPrefix');
     }
 
     /**
-     * Sets the current match type
-     * @param int $matchType
+     * {@inheritdoc}
      */
-    public function setCurrentMatchType($matchType)
+    public function getPostParameters()
     {
-        $this->matchType = $matchType;
+        return $this->getAttribute('postParameter', []);
     }
 
     /**
-     * Sets the current localization
-     * @param \Sulu\Component\Webspace\Localization $localization
+     * {@inheritdoc}
      */
-    protected function setCurrentLocalization($localization)
+    public function getGetParameters()
     {
-        $this->localization = $localization;
+        return $this->getAttribute('getParameter', []);
     }
 
     /**
-     * Sets the current webspace
-     * @param \Sulu\Component\Webspace\Webspace $webspace
+     * {@inheritdoc}
      */
-    protected function setCurrentWebspace($webspace)
+    public function getAnalyticsKey()
     {
-        $this->webspace = $webspace;
-
-        // If security is enabled, the security user repository system will get overwritten.
-        if ($webspaceSecurity = $webspace->getSecurity()) {
-            $this->userRepository->setSystem($webspaceSecurity->getSystem());
-        }
+        return $this->getAttribute('analyticsKey', '');
     }
 
     /**
-     * Sets the current portal
-     * @param \Sulu\Component\Webspace\Portal $portal
+     * {@inheritdoc}
      */
-    protected function setCurrentPortal($portal)
+    public function getPortalInformation()
     {
-        $this->portal = $portal;
-    }
-
-    /**
-     * Sets the current segment
-     * @param \Sulu\Component\Webspace\Segment $segment
-     */
-    protected function setCurrentSegment($segment)
-    {
-        $this->segment = $segment;
-    }
-
-    /**
-     * Sets the redirect
-     * @param string $redirect
-     */
-    protected function setCurrentRedirect($redirect)
-    {
-        $this->redirect = $redirect;
-    }
-
-    /**
-     * Sets the url of the current portal
-     * @param string $portalUrl
-     */
-    protected function setCurrentPortalUrl($portalUrl)
-    {
-        $this->portalUrl = $portalUrl;
-    }
-
-    /**
-     * Sets the path of the current request
-     * @param $path
-     */
-    protected function setCurrentResourceLocator($path)
-    {
-        $this->resourceLocator = $path;
-    }
-
-    /**
-     * Sets the prefix require before the resource locator
-     * @param string $resourceLocatorPrefix
-     */
-    protected function setCurrentResourceLocatorPrefix($resourceLocatorPrefix)
-    {
-        $this->resourceLocatorPrefix = $resourceLocatorPrefix;
+        return $this->getAttribute('portalInformation');
     }
 }

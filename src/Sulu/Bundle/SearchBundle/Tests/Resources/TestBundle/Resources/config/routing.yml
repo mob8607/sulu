@@ -1,0 +1,3 @@
+test_search:
+    path: /{locale}/search
+    defaults: { _controller: TestBundle:Search:query }

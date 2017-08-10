@@ -1,6 +1,7 @@
 <?php
+
 /*
- * This file is part of the Sulu CMS.
+ * This file is part of Sulu.
  *
  * (c) MASSIVE ART WebServices GmbH
  *
@@ -14,6 +15,11 @@ use Doctrine\Common\Persistence\Mapping\ClassMetadata;
 use Doctrine\Common\Persistence\ObjectManager;
 use Doctrine\ORM\EntityRepository;
 
+/**
+ * Class ListRepository.
+ *
+ * @deprecated
+ */
 class ListRepository extends EntityRepository
 {
     /**
@@ -22,8 +28,8 @@ class ListRepository extends EntityRepository
     private $helper;
 
     /**
-     * @param ObjectManager $em
-     * @param ClassMetadata $class
+     * @param ObjectManager  $em
+     * @param ClassMetadata  $class
      * @param ListRestHelper $helper
      */
     public function __construct(ObjectManager $em, ClassMetadata $class, ListRestHelper $helper)
@@ -33,14 +39,16 @@ class ListRepository extends EntityRepository
     }
 
     /**
-     * Find list with parameter
+     * Find list with parameter.
      *
-     * @param array $where
+     * @param array  $where
      * @param string $prefix
-     * @param bool $justCount Defines, if find should just return the total number of results
+     * @param bool   $justCount      Defines, if find should just return the total number of results
+     * @param array  $joinConditions optionally specify conditions on join
+     *
      * @return array|object|int
      */
-    public function find($where = array(), $prefix = 'u', $justCount = false)
+    public function find($where = [], $prefix = 'u', $justCount = false, $joinConditions = [])
     {
         $searchPattern = $this->helper->getSearchPattern();
         $searchFields = $this->helper->getSearchFields();
@@ -50,11 +58,11 @@ class ListRepository extends EntityRepository
             $searchFields = $this->getEntityManager()->getClassMetadata($this->getEntityName())->getFieldNames();
         }
 
-        $textFields = $this->getFieldsWitTypes(array('text', 'string', 'guid'), $searchFields);
+        $textFields = $this->getFieldsWitTypes(['text', 'string', 'guid'], $searchFields);
         if (is_numeric($searchPattern)) {
-            $numberFields = $this->getFieldsWitTypes(array('integer', 'float', 'decimal'), $searchFields);
+            $numberFields = $this->getFieldsWitTypes(['integer', 'float', 'decimal'], $searchFields);
         } else {
-            $numberFields = array();
+            $numberFields = [];
         }
 
         $queryBuilder = new ListQueryBuilder(
@@ -65,7 +73,8 @@ class ListRepository extends EntityRepository
             $this->helper->getSorting(),
             $where,
             $textFields,
-            $numberFields
+            $numberFields,
+            $joinConditions
         );
 
         if ($justCount) {
@@ -82,11 +91,11 @@ class ListRepository extends EntityRepository
                 ->setMaxResults($this->helper->getLimit());
         }
         if ($searchPattern != null && $searchPattern != '') {
-            if (sizeof($searchFields) > 0) {
-                if (sizeof($textFields) > 0) {
+            if (count($searchFields) > 0) {
+                if (count($textFields) > 0) {
                     $query->setParameter('search', '%' . $searchPattern . '%');
                 }
-                if (sizeof($numberFields) > 0) {
+                if (count($numberFields) > 0) {
                     $query->setParameter('strictSearch', $searchPattern);
                 }
             }
@@ -97,29 +106,85 @@ class ListRepository extends EntityRepository
             return intval($query->getSingleResult()['totalcount']);
         }
 
-        return $query->getArrayResult();
+        $results = $query->getArrayResult();
+
+        // check if relational filter was set ( e.g. emails[0]_email)
+        // and filter result
+        if (count($filters = $queryBuilder->getRelationalFilters()) > 0) {
+            $filteredResults = [];
+            // check if fields do contain id, else skip
+            if (count($fields = $this->helper->getFields()) > 0 && array_search('id', $fields) !== false) {
+                $ids = [];
+                foreach ($results as $result) {
+                    $id = $result['id'];
+                    // check if result already in resultset
+                    if (!array_key_exists($id, $ids)) {
+                        $ids[$id] = -1;
+                        $filteredResults[] = $result;
+                    }
+                    ++$ids[$id];
+                    // check filters
+                    foreach ($filters as $filter => $key) {
+                        // check if we are at the specified index
+                        if ($key == $ids[$id]) {
+                            $index = $this->getArrayIndexByKeyValue($filteredResults, $id);
+                            // set to current key
+                            $filteredResults[$index][$filter] = $result[$filter];
+                        }
+                    }
+                }
+                $results = $filteredResults;
+            }
+        }
+
+        return $results;
     }
 
     /**
-     * returns the amount of data
-     * @param array $where
+     * returns array index of by a specified key value.
+     *
+     * @param $array
+     * @param $value
+     * @param string $key
+     *
+     * @return bool|int|string
+     */
+    private function getArrayIndexByKeyValue($array, $value, $key = 'id')
+    {
+        foreach ($array as $index => $result) {
+            if ($result[$key] === $value) {
+                return $index;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * returns the amount of data.
+     *
+     * @param array  $where
+     * @param array  $joinConditions
      * @param string $prefix
+     *
      * @return int
      */
-    public function getCount($where = array(), $prefix = 'u')
+    public function getCount($where = [], $joinConditions = [], $prefix = 'u')
     {
-        return $this->find($where, $prefix, true);
+        return $this->find($where, $prefix, true, $joinConditions);
     }
 
     /**
-     * returns all fields with a specified type
+     * returns all fields with a specified type.
+     *
      * @param array $types
-     * @param null $intersectArray only return fields that are defined in this array
+     * @param null  $intersectArray only return fields that are defined in this array
+     *
      * @return array
      */
     public function getFieldsWitTypes(array $types, $intersectArray = null)
     {
-        $result = array();
+        $result = [];
         foreach ($this->getClassMetadata()->getFieldNames() as $field) {
             $type = $this->getClassMetadata()->getTypeOfField($field);
             if (in_array($type, $types)) {
@@ -130,6 +195,7 @@ class ListRepository extends EntityRepository
         if (!is_null($intersectArray)) {
             $result = array_intersect($result, $intersectArray);
         }
+
         return $result;
     }
 }
